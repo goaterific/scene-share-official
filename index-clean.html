@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SceneShare — RTDB (Accounts + Posts + Likes + Comments)</title>
+<style>
+  :root{
+    --bg:#0f1115;--card:#151922;--ui:#1d2330;--ink:#e8ecf1;--muted:#9aa3b2;
+    --brand:#7af0ff;--ok:#8aff8a;--bad:#ff6b6b;--border:#222835;--chip:#1b2130;--chipbd:#2a3246;
+  }
+  .light{
+    --bg:#f7f8fb;--card:#ffffff;--ui:#f1f3f8;--ink:#0f1115;--muted:#566070;
+    --brand:#0078ff;--ok:#2f8f46;--bad:#c0392b;--border:#d9dfeb;--chip:#f1f3f8;--chipbd:#d9dfeb;
+  }
+  html,body{height:100%}
+  body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--ink);margin:0;padding:24px;transition:background .2s,color .2s}
+  .wrap{max-width:980px;margin:0 auto}
+  h1{margin:0 0 16px;display:flex;align-items:center;gap:10px}
+  .brand-dot{width:10px;height:10px;border-radius:50%;background:var(--brand);box-shadow:0 0 16px var(--brand)}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:12px;margin:10px 0}
+  input,textarea,button{width:100%;padding:10px;border-radius:10px;border:1px solid var(--border);background:var(--ui);color:var(--ink)}
+  textarea{min-height:80px}
+  .row{display:flex;gap:8px;margin-top:8px}
+  .row > *{flex:1}
+  .right{display:flex;gap:8px;align-items:center}
+  .muted{color:var(--muted);font-size:12px}
+  .post{padding:12px}
+  .meta{font-size:12px;color:var(--muted);margin-bottom:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .actions{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+  .chip{display:inline-block;background:var(--chip);border:1px solid var(--chipbd);border-radius:999px;padding:4px 10px;font-size:12px;color:var(--muted);margin-right:6px}
+  .comments{margin-top:10px;border-top:1px solid var(--border);padding-top:8px}
+  .comment{background:var(--ui);border:1px solid var(--border);border-radius:8px;padding:8px;margin-top:6px}
+  .ok{color:var(--ok)} .bad{color:var(--bad)} .warn{color:#d59b18}
+  .toolbar{display:flex;gap:6px}
+  .btn{display:inline-flex;align-items:center;gap:8px;background:transparent;border:1px solid var(--chipbd);border-radius:10px;padding:8px 12px;color:var(--ink);cursor:pointer}
+  .btn:hover{filter:brightness(1.08)}
+  .btn.active.like{background:rgba(138,255,138,.15);border-color:var(--ok)}
+  .btn.active.dislike{background:rgba(255,107,107,.15);border-color:var(--bad)}
+  .btn svg{width:16px;height:16px;fill:currentColor}
+  .del{background:transparent;border:1px dashed var(--bad);color:var(--bad)}
+  .modebtn{width:auto;background:transparent;border:1px solid var(--chipbd)}
+  a{color:var(--brand);text-decoration:none;word-break:break-all}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1><span class="brand-dot"></span> SceneShare</h1>
+
+  <!-- Controls -->
+  <div class="row" style="margin-bottom:8px">
+    <button id="refreshBtn" class="modebtn">Refresh feed</button>
+    <button id="clearAllBtn" class="modebtn" style="display:none">Clear all posts</button>
+    <button id="modeToggle" class="modebtn">Toggle Light/Dark</button>
+    <div class="muted" style="align-self:center">Current account: <b id="who">None</b></div>
+  </div>
+
+  <!-- Account box -->
+  <div class="card">
+    <div class="row">
+      <input id="accName" placeholder="Username (claim or login)" maxlength="20">
+      <input id="accCode" placeholder="Passcode" type="password">
+      <button id="accUse">Use account</button>
+    </div>
+    <div class="row">
+      <div id="accMsg" class="muted"></div>
+    </div>
+  </div>
+
+  <!-- Composer -->
+  <div class="card">
+    <div class="row">
+      <input id="link" placeholder="Link (YouTube, Vimeo, etc.)">
+    </div>
+    <div class="row">
+      <textarea id="text" placeholder="Write your post..."></textarea>
+    </div>
+    <div class="row">
+      <button id="send">Post</button>
+    </div>
+    <div id="postMsg" class="muted"></div>
+  </div>
+
+  <div id="feed"></div>
+</div>
+
+<script>
+const DB = "https://clapboard-ef075-default-rtdb.firebaseio.com";
+
+/* ===== Helpers ===== */
+const $ = s => document.querySelector(s);
+function escapeHtml(s){ return String(s||'').replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;' }[m])); }
+function timeAgo(ms){
+  const s = Math.floor((Date.now()-ms)/1000);
+  const u = [['y',31536000],['mo',2592000],['w',604800],['d',86400],['h',3600],['m',60],['s',1]];
+  for (const [n,sec] of u){ const v = Math.floor(s/sec); if(v>=1) return v+n; } return 'now';
+}
+const slug = s => (s||'').toLowerCase().trim().replace(/[^a-z0-9_]/g,'').slice(0,20);
+const LS = {
+  current: "sceneshare-current",
+  mode: "sceneshare-mode",
+  views: "sceneshare-views-session"
+};
+const getCurrent = ()=> localStorage.getItem(LS.current)||"";
+const setCurrent = v => localStorage.setItem(LS.current, v||"");
+const getViewsSeen = ()=> JSON.parse(sessionStorage.getItem(LS.views) || "{}");
+const setViewsSeen = o => sessionStorage.setItem(LS.views, JSON.stringify(o));
+
+async function sha256(text){
+  const enc = new TextEncoder().encode(text);
+  const buf = await crypto.subtle.digest("SHA-256", enc);
+  return [...new Uint8Array(buf)].map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+
+/* ===== Theme Toggle ===== */
+function applyMode(){
+  const m = localStorage.getItem(LS.mode) || 'dark';
+  if(m==='light') document.body.classList.add('light'); else document.body.classList.remove('light');
+  $('#modeToggle').textContent = m==='light' ? 'Switch to Dark' : 'Switch to Light';
+}
+$('#modeToggle').onclick = ()=>{
+  const m = localStorage.getItem(LS.mode) || 'dark';
+  localStorage.setItem(LS.mode, m==='light'?'dark':'light'); applyMode();
+};
+
+
+/* ===== Profanity Filter (list + leetspeak handling) ===== */
+// Core list (extendable). Deliberately not exhaustive here; combined with leetspeak patterns.
+const SWEAR_WORDS = [
+  "fuck","shit","bitch","bastard","asshole","dick","piss","cunt","prick","wanker",
+  "motherfucker","bullshit","twat","slag","slut","whore","skank","cock","balls","bollocks",
+  "damn","bloody","bugger","arse","crap","douche","nigger","nigga","spic","chink","kike",
+  "retard","retarded","spastic","faggot","fag","dyke"
+];
+
+// Map for common leet/obfuscation chars
+const LEET = {
+  'a':'[a@4àáâãäåæ]', 'b':'[b8]', 'c':'[c(¢]',
+  'd':'[d]','e':'[e3èéêë]','f':'[fƒ]','g':'[g9]','h':'[h]',
+  'i':'[i1!|ìíîï]','j':'[j]','k':'[k]','l':'[l1|]','m':'[m]',
+  'n':'[nñ]','o':'[o0òóôõöø]','p':'[p]','q':'[q]','r':'[r]',
+  's':'[s$5]','t':'[t7+]','u':'[uµùúûü]','v':'[v]','w':'[w]',
+  'x':'[x×]','y':'[yÿ]','z':'[z2]'
+};
+
+function wordToPattern(w){
+  const chars = w.toLowerCase().split('').map(ch => LEET[ch] || ch.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'));
+  // Allow any number of non-alphanumerics between letters to catch f@!u#c$k etc.
+  return chars.join('[^a-z0-9]*');
+}
+
+// Prebuild regexes for speed
+const SWEAR_REGEXES = SWEAR_WORDS.map(w => new RegExp(wordToPattern(w), 'gi'));
+
+// Censor function: replaces each matched character span with *
+function censorText(input){
+  if(!input) return input;
+  let out = input;
+  SWEAR_REGEXES.forEach(rx => {
+    out = out.replace(rx, (m)=>'*'.repeat(m.length));
+  });
+  return out;
+}
+
+/* ===== RTDB fetch wrappers ===== */
+async function rGET(p){ const r = await fetch(DB+p+".json"); return r.ok ? r.json() : null; }
+async function rPUT(p,b){ const r = await fetch(DB+p+".json",{method:"PUT",body:JSON.stringify(b)}); return r.json(); }
+async function rPOST(p,b){ const r = await fetch(DB+p+".json",{method:"POST",body:JSON.stringify(b)}); return r.json(); }
+async function rPATCH(p,b){ const r = await fetch(DB+p+".json",{method:"PATCH",body:JSON.stringify(b)}); return r.json(); }
+async function rDELETE(p){ const r = await fetch(DB+p+".json",{method:"DELETE"}); return r.json(); }
+
+/* ===== Accounts (claim/login) ===== */
+async function useAccount(){
+  const raw = $('#accName').value.trim();
+  const uname = slug(raw);
+  const code = $('#accCode').value;
+  const msg = $('#accMsg');
+  msg.textContent = '';
+  if(uname.length<3){ msg.textContent = 'Username too short.'; msg.className='muted bad'; return; }
+  if(!code){ msg.textContent = 'Enter a passcode.'; msg.className='muted bad'; return; }
+  const passHash = await sha256(code);
+  const acc = await rGET('/accounts/'+uname);
+  if(acc && acc.passHash && acc.passHash !== passHash){
+    msg.textContent = 'Username taken (or wrong passcode).'; msg.className='muted bad'; return;
+  }
+  const safeDisplay = censorText(raw || uname);
+  await rPATCH('/accounts/'+uname, {
+    username: safeDisplay,
+    passHash,
+    updatedAt: Date.now()
+  });
+  setCurrent(uname);
+  $('#who').textContent = raw || uname;
+  msg.textContent = 'Account ready ✔'; msg.className='muted ok';
+  document.getElementById('clearAllBtn').style.display = (uname==='admin') ? 'inline-block' : 'none';
+}
+$('#accUse').onclick = useAccount;
+
+/* ===== Composer ===== */
+$('#send').onclick = async () => {
+  const me = getCurrent();
+  const postMsg = $('#postMsg');
+  if(!me){ postMsg.textContent = 'Pick an account first.'; postMsg.className='muted bad'; return; }
+  const acc = await rGET('/accounts/'+me) || {};
+  const display = acc.username || me;
+
+  const link = $('#link').value.trim();
+  let text = $('#text').value.trim();
+  text = censorText(text);
+  if(!text){ postMsg.textContent='Write something.'; postMsg.className='muted bad'; return; }
+
+  const res = await rPOST('/posts', { name: display, author: me, link, text, createdAt: Date.now(), likes:0, dislikes:0, views:0 });
+  const id = res && res.name;
+  if(id){ await rPATCH('/posts/'+id, { id }); }
+  $('#text').value = '';
+  postMsg.textContent = 'Posted ✔'; postMsg.className='muted ok';
+};
+
+/* ===== Likes/Dislikes per account ===== */
+async function likePost(id, type){
+  const me = getCurrent();
+  if(!me){ alert('Pick an account first'); return; }
+  const post = await rGET('/posts/'+id);
+  if(!post) return;
+  post.votes = post.votes || {};
+  const prev = post.votes[me]?.type || null;
+  if(prev === type) return;
+  let likes = post.likes||0, dislikes = post.dislikes||0;
+  if(prev==='like') likes=Math.max(0,likes-1);
+  if(prev==='dislike') dislikes=Math.max(0,dislikes-1);
+  if(type==='like') likes++;
+  if(type==='dislike') dislikes++;
+  post.votes[me] = { type };
+  await rPATCH('/posts/'+id, { likes, dislikes, votes: post.votes });
+}
+
+/* ===== Delete Post (author only) ===== */
+async function deletePost(id){
+  const me = getCurrent();
+  if(!me) return alert('Pick an account first');
+  const post = await rGET('/posts/'+id);
+  if(!post) return;
+  if(post.author !== me) return alert("You can only delete your own post.");
+  if(!confirm("Delete this post? This will remove its comments too.")) return;
+  await rDELETE('/comments/'+id);
+  await rDELETE('/posts/'+id);
+  await refresh();
+}
+
+/* ===== Comments (flat) ===== */
+async function addComment(postId){
+  const me = getCurrent();
+  if(!me){ alert('Pick an account first'); return; }
+  const acc = await rGET('/accounts/'+me) || {};
+  let text = document.getElementById("ctext-"+postId).value.trim();
+  text = censorText(text);
+  if(!text) return;
+  try{
+    await rPOST('/comments/'+postId, { name: acc.username || me, author: me, text, createdAt: Date.now(), parentId: null });
+    document.getElementById("ctext-"+postId).value = "";
+    await refresh();
+  }catch(e){ alert('Failed to comment: '+e); }
+}
+
+/* ===== Feed ===== */
+async function refresh(){
+  const feed = document.getElementById("feed");
+  const posts = await rGET("/posts") || {};
+  const entries = Object.values(posts).sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
+  if(entries.length===0){ feed.innerHTML = '<div class="card">No posts yet.</div>'; return; }
+
+  // Views: once per session per post
+  const seen = getViewsSeen();
+  for(const p of entries){
+    if(!seen[p.id]){
+      seen[p.id] = 1;
+      await rPATCH('/posts/'+p.id, { views: (p.views||0)+1 });
+    }
+  }
+  setViewsSeen(seen);
+
+  let html = "";
+  const me = getCurrent();
+  for(const p of entries){
+    const comments = await rGET("/comments/"+p.id) || {};
+    const myType = (p.votes && p.votes[me] && p.votes[me].type) || null;
+    html += `
+      <div class="card post" id="post-${p.id}">
+        <div class="meta">
+          <b>${escapeHtml(censorText(p.name)||'Anon')}</b>${p.views>=1000?`
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="currentColor" style="vertical-align:middle; margin-left:4px; cursor:pointer;">
+<title>This user has gotten over 1,000 viewers on their post</title>
+<path d="M22.5 12l-2.07 2.38.3 3.14-3.07.94-1.77 2.64-3-1.15-3 1.15-1.77-2.64-3.07-.94.3-3.14L1.5 12l2.07-2.38-.3-3.14 3.07-.94 1.77-2.64 3 1.15 3-1.15 1.77 2.64 3.07.94-.3 3.14L22.5 12zm-12.59 1.41L9.91 15l5.66-5.66-1.41-1.41-4.25 4.25-2.12-2.12-1.41 1.41 3.53 3.53z"></path>
+</svg>
+`:''}
+          <span>• ${timeAgo(p.createdAt||Date.now())}</span>
+          <span class="chip">👁️ ${p.views||0} views</span>
+        </div>
+        ${p.link ? `<div><a href="${escapeHtml(p.link)}" target="_blank">${escapeHtml(p.link)}</a></div>` : ''}
+        <div style="margin-top:6px">${escapeHtml(censorText(p.text)||'')}</div>
+        <div style="margin-top:8px">
+          <span class="chip">👍 ${p.likes||0}</span>
+          <span class="chip">👎 ${p.dislikes||0}</span>
+        </div>
+        <div class="actions">
+          <div class="toolbar">
+            <button class="btn ${myType==='like'?'active like':''}" data-act="like" data-id="${p.id}">
+              <svg viewBox="0 0 24 24"><path d="M1 21h4V9H1v12zM23 10c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14 1 7.59 7.41C7.22 7.78 7 8.3 7 8.83V19c0 1.1.9 2 2 2h9c.82 0 1.54-.5 1.84-1.22l3-7c.1-.23.16-.48.16-.78v-2z"/></svg>
+              Like
+            </button>
+            <button class="btn ${myType==='dislike'?'active dislike':''}" data-act="dislike" data-id="${p.id}">
+              <svg viewBox="0 0 24 24"><path d="M15 3H6c-.82 0-1.54.5-1.84 1.22l-3 7c-.1.23-.16.48-.16.78v2c0 1.1.9 2 2 2h6.31l-.95 4.57-.03.32c0 .41.17.79.44 1.06L10 23l6.41-6.41c.37-.37.59-.89.59-1.42V5c0-1.1-.9-2-2-2zm4 0v12h4V3h-4z"/></svg>
+              Dislike
+            </button>
+          </div>
+          ${p.author===me ? `<button class="del" onclick="deletePost('${p.id}')">Delete post</button>` : ''}
+        </div>
+        <div class="comments">
+          <div><b>Comments</b></div>
+          ${renderComments(p.id, comments)}
+          <div class="row" style="margin-top:6px">
+            <input id="ctext-${p.id}" placeholder="Write a comment as ${escapeHtml(me||'Anon')}">
+            <button onclick="addComment('${p.id}')">Send</button>
+          </div>
+        </div>
+      </div>`;
+  }
+  feed.innerHTML = html;
+  // wire like/dislike buttons
+  document.querySelectorAll('.btn[data-act]').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      const id = btn.getAttribute('data-id');
+      const act = btn.getAttribute('data-act');
+      await likePost(id, act);
+      await refresh();
+    });
+  });
+}
+
+
+function renderComments(postId, comments){
+  const arr = comments ? Object.values(comments) : [];
+  arr.sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
+  return arr.map(c => `
+    <div class="comment">
+      <div class="meta"><b>${escapeHtml(censorText(c.name)||'Anon')}</b> • ${timeAgo(c.createdAt||Date.now())}</div>
+      <div>${escapeHtml(censorText(c.text)||'')}</div>
+    </div>
+  `).join("");
+}
+
+/* ===== Init ===== */
+function init(){
+  document.getElementById('refreshBtn').onclick = ()=> refresh();
+  document.getElementById('clearAllBtn').onclick = async ()=>{
+    if(confirm('Delete ALL posts and comments?')){ await rDELETE('/comments'); await rDELETE('/posts'); await refresh(); }
+  };
+  $('#who').textContent = getCurrent() || 'None';
+  applyMode();
+  refresh();
+  }
+init();
+
+// Helper to wipe all posts/comments (run from DevTools if you need to clear test data)
+async function SceneShareWipeAll(){ await rDELETE('/comments'); await rDELETE('/posts'); await refresh(); console.log('SceneShare: wiped posts & comments'); }
+
+</script>
+</body>
+</html>
